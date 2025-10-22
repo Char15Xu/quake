@@ -150,11 +150,20 @@ conda run -n "${CONDA_ENV_NAME}" pip install torch torchvision torchaudio --inde
 conda run -n "${CONDA_ENV_NAME}" pip install \
     lightgbm \
     scikit-learn \
-    scann==1.4.0
+    tabulate
 
-# Force numpy 1.25.0 for diskannpy compatibility
-conda run -n "${CONDA_ENV_NAME}" pip install numpy==1.25.0 --force-reinstall
+# Install older versions compatible with numpy 1.25.x
+# scann 1.4.0 requires numpy~=2.0, so use 1.3.2 which works with numpy 1.25.x
+conda run -n "${CONDA_ENV_NAME}" pip install scann==1.3.2
+
+# Force numpy 1.25.2 for diskannpy and scipy compatibility
+# (diskannpy 0.7.0 requires numpy==1.25, scipy requires >=1.25.2)
+conda run -n "${CONDA_ENV_NAME}" pip install numpy==1.25.2 --force-reinstall
 conda run -n "${CONDA_ENV_NAME}" pip install diskannpy==0.7.0
+
+# Downgrade faiss-cpu to 1.7.4 for numpy 1.25.x compatibility
+# (faiss-cpu 1.12.0+ requires numpy 2.0+ with numpy._core module)
+conda run -n "${CONDA_ENV_NAME}" pip install faiss-cpu==1.7.4 --force-reinstall
 
 echo ">>> Verifying '${CONDA_ENV_NAME}'..."
 conda env list
