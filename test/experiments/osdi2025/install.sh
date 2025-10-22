@@ -210,6 +210,19 @@ git submodule update --init --recursive
 
 echo ">>> Building and installing QUAKE Python package..."
 conda run -n "${CONDA_ENV_NAME}" pip install . --no-use-pep517
+
+echo ">>> Copying freshly built bindings to ensure ABI compatibility..."
+# Copy the newly built bindings from src/python/ to site-packages to avoid ABI compatibility issues
+SITE_PACKAGES_PATH=$(conda run -n "${CONDA_ENV_NAME}" python -c "import site; print(site.getsitepackages()[0])")
+if [ -f "${QUAKE_FULL_PATH}/src/python/_bindings.cpython-311-x86_64-linux-gnu.so" ]; then
+    cp "${QUAKE_FULL_PATH}/src/python/_bindings.cpython-311-x86_64-linux-gnu.so" "${SITE_PACKAGES_PATH}/quake/"
+    echo "Copied _bindings.cpython-311-x86_64-linux-gnu.so"
+fi
+if [ -f "${QUAKE_FULL_PATH}/src/python/libquake_c.so" ]; then
+    cp "${QUAKE_FULL_PATH}/src/python/libquake_c.so" "${SITE_PACKAGES_PATH}/quake/"
+    echo "Copied libquake_c.so"
+fi
+
 cd /
 
 # -----------------------------
