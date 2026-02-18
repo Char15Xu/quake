@@ -121,7 +121,7 @@ channels:
 dependencies:
   - python=3.11
   - numpy
-  - pandas
+  - pandas<3
   - faiss-cpu
   - matplotlib
   - pytest
@@ -137,7 +137,7 @@ EOF
 # If environment exists, remove it for a clean setup
 if conda env list | grep -E "^${CONDA_ENV_NAME}\s+"; then
     echo "Conda environment '${CONDA_ENV_NAME}' already exists. Removing for a clean setup..."
-    conda env remove -n "${CONDA_ENV_NAME}" --all -y
+    conda remove -n "${CONDA_ENV_NAME}" --all -y
 fi
 echo ">>> Creating conda environment '${CONDA_ENV_NAME}' from /tmp/conda.yaml..."
 conda env create -f /tmp/conda.yaml
@@ -205,10 +205,10 @@ if [ -d "${QUAKE_FULL_PATH}" ]; then
   cd "${QUAKE_FULL_PATH}"
   git pull
 else
-  git clone https://github.com/marius-team/quake.git "${QUAKE_FULL_PATH}"
+  git clone https://github.com/yuhong-zhong/quake.git "${QUAKE_FULL_PATH}"
   cd "${QUAKE_FULL_PATH}"
 fi
-git checkout osdi2025
+git checkout yuhong/dev
 
 git config --global --add safe.directory "${QUAKE_FULL_PATH}" # For root's global config
 SUBMODULE_PATHS=("src/cpp/third_party/concurrentqueue" "src/cpp/third_party/faiss" "src/cpp/third_party/pybind11")
@@ -217,8 +217,15 @@ for SUBMODULE_PATH in "${SUBMODULE_PATHS[@]}"; do
 done
 git submodule update --init --recursive
 
+echo ">>> Fixing ABI compatibility: match PyTorch's _GLIBCXX_USE_CXX11_ABI setting..."
+# PyTorch 2.10+ uses _GLIBCXX_USE_CXX11_ABI=1 (new ABI), but quake's CMakeLists.txt
+# hardcodes _GLIBCXX_USE_CXX11_ABI=0 (old ABI). Fix to match PyTorch.
+TORCH_CXX11_ABI=$(conda run -n "${CONDA_ENV_NAME}" python -c "import torch; print(int(torch._C._GLIBCXX_USE_CXX11_ABI))")
+echo "Detected PyTorch _GLIBCXX_USE_CXX11_ABI=${TORCH_CXX11_ABI}"
+sed -i "s/add_compile_definitions(_GLIBCXX_USE_CXX11_ABI=0)/add_compile_definitions(_GLIBCXX_USE_CXX11_ABI=${TORCH_CXX11_ABI})/" "${QUAKE_FULL_PATH}/CMakeLists.txt"
+
 echo ">>> Building and installing QUAKE Python package..."
-conda run -n "${CONDA_ENV_NAME}" pip install . --no-use-pep517
+conda run -n "${CONDA_ENV_NAME}" pip install --no-build-isolation --no-deps .
 
 echo ">>> Copying freshly built bindings to ensure ABI compatibility..."
 # Copy the newly built bindings from src/python/ to site-packages to avoid ABI compatibility issues
