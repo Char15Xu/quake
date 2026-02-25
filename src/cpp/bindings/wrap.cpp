@@ -110,10 +110,20 @@ PYBIND11_MODULE(_bindings, m) {
              "Args:\n"
              "    path (str): The path to save the index.")
         .def("load", &QuakeIndex::load,
+             py::arg("path"), py::arg("n_workers") = 0, py::arg("use_numa") = false,
+             py::arg("parent_n_workers") = 0,
+             py::arg("s3_bucket") = "", py::arg("s3_prefix") = "",
+             py::arg("s3_region") = "us-east-1", py::arg("s3_endpoint") = "",
              "Load an index from a specified path.\n\n"
              "Args:\n"
              "    path (str): The path from which to load the index.\n"
-             "    n_workers (int, optional): Number of workers for query processing (default = 0).")
+             "    n_workers (int, optional): Number of workers for query processing (default = 0).\n"
+             "    use_numa (bool, optional): Enable NUMA-aware memory allocation (default = False).\n"
+             "    parent_n_workers (int, optional): Workers for the parent index (default = 0).\n"
+             "    s3_bucket (str, optional): S3 bucket name; enables S3 mode when non-empty.\n"
+             "    s3_prefix (str, optional): S3 key prefix for partition objects.\n"
+             "    s3_region (str, optional): AWS region (default = 'us-east-1').\n"
+             "    s3_endpoint (str, optional): Custom S3 endpoint URL (e.g. MinIO).")
         .def("ntotal", &QuakeIndex::ntotal,
              "Return the total number of vectors stored in the index.")
         .def("nlist", &QuakeIndex::nlist,
@@ -348,6 +358,10 @@ PYBIND11_MODULE(_bindings, m) {
             "Time spent on APS in nanoseconds.")
         .def_readwrite("scan_time_ns", &SearchTimingInfo::scan_time_ns,
             "Time spent on scanning in nanoseconds.")
+        .def_readwrite("s3_load_time_ns", &SearchTimingInfo::s3_load_time_ns,
+            "Total S3 download time for this query in nanoseconds (S3 mode only).")
+        .def_readwrite("n_s3_downloads", &SearchTimingInfo::n_s3_downloads,
+            "Number of partitions downloaded from S3 for this query.")
          .def("__repr__", [](const SearchTimingInfo &s) {
              std::ostringstream oss;
              oss << "{";

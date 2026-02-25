@@ -4,6 +4,23 @@
 #include <iostream>
 #include <fstream>
 
+#ifdef QUAKE_USE_S3
+#include <aws/core/Aws.h>
+#include <aws/core/auth/AWSCredentialsProviderChain.h>
+#include <aws/s3/S3Client.h>
+#include <aws/s3/model/GetObjectRequest.h>
+#include <aws/core/client/ClientConfiguration.h>
+
+static std::once_flag aws_init_flag;
+static Aws::SDKOptions aws_sdk_options;
+
+static void ensure_aws_initialized() {
+    std::call_once(aws_init_flag, []() {
+        Aws::InitAPI(aws_sdk_options);
+    });
+}
+#endif
+
 namespace faiss {
     ArrayInvertedLists *convert_to_array_invlists(DynamicInvertedLists *invlists,
                                                   std::unordered_map<size_t, size_t> &remap_ids) {
@@ -66,6 +83,13 @@ namespace faiss {
     }
 
     size_t DynamicInvertedLists::list_size(size_t list_no) const {
+        if (s3_mode_) {
+            auto it = s3_num_vectors_.find(list_no);
+            if (it == s3_num_vectors_.end()) {
+                throw std::runtime_error("S3 partition " + std::to_string(list_no) + " not in manifest");
+            }
+            return it->second;
+        }
         auto it = partitions_.find(list_no);
         if (it == partitions_.end()) {
             string err_message = "List " + std::to_string(list_no) + " does not exist in list_size";
@@ -75,6 +99,18 @@ namespace faiss {
     }
 
     const uint8_t *DynamicInvertedLists::get_codes(size_t list_no) const {
+        if (s3_mode_) {
+            std::lock_guard<std::mutex> lk(temp_s3_mutex_);
+            if (!temp_s3_.count(list_no)) {
+                auto t0 = high_resolution_clock::now();
+                temp_s3_[list_no] = s3_fetch_partition(list_no);
+                int64_t elapsed = duration_cast<nanoseconds>(
+                    high_resolution_clock::now() - t0).count();
+                s3_load_time_ns_.fetch_add(elapsed, std::memory_order_relaxed);
+                n_s3_downloads_.fetch_add(1, std::memory_order_relaxed);
+            }
+            return temp_s3_.at(list_no)->codes_;
+        }
         auto it = partitions_.find(list_no);
         if (it == partitions_.end()) {
             string err_message = "List " + std::to_string(list_no) + " does not exist in get_codes";
@@ -84,6 +120,16 @@ namespace faiss {
     }
 
     const idx_t *DynamicInvertedLists::get_ids(size_t list_no) const {
+        if (s3_mode_) {
+            std::lock_guard<std::mutex> lk(temp_s3_mutex_);
+            // get_codes() must have been called first for this partition
+            auto it = temp_s3_.find(list_no);
+            if (it == temp_s3_.end()) {
+                throw std::runtime_error("S3 partition " + std::to_string(list_no) +
+                                         " not downloaded; call get_codes() first");
+            }
+            return it->second->ids_;
+        }
         auto it = partitions_.find(list_no);
         if (it == partitions_.end()) {
             string err_message = "List " + std::to_string(list_no) + " does not exist in get_ids";
@@ -98,6 +144,35 @@ namespace faiss {
 
     void DynamicInvertedLists::release_ids(size_t list_no, const idx_t *ids) const {
         // No action needed because get_ids does not allocate new memory
+    }
+
+    shared_ptr<IndexPartition> DynamicInvertedLists::s3_fetch_partition(size_t pid) const {
+#ifdef QUAKE_USE_S3
+        string key = s3_prefix_ + "/partition_" + std::to_string(pid);
+        Aws::S3::Model::GetObjectRequest req;
+        req.SetBucket(s3_bucket_);
+        req.SetKey(key);
+        auto outcome = s3_client_->GetObject(req);
+        if (!outcome.IsSuccess()) {
+            throw std::runtime_error(
+                "S3 GetObject failed for key=" + key + ": " +
+                outcome.GetError().GetMessage().c_str());
+        }
+        auto& body = outcome.GetResult().GetBody();
+        size_t nv = s3_num_vectors_.at(pid);
+        size_t csize = nv * static_cast<size_t>(code_size);
+        size_t isize = nv * sizeof(idx_t);
+        uint8_t *codes = new uint8_t[csize];
+        idx_t   *ids   = new idx_t[nv];
+        body.read(reinterpret_cast<char*>(codes), csize);
+        body.read(reinterpret_cast<char*>(ids),   isize);
+        auto part = std::make_shared<IndexPartition>(nv, codes, ids, code_size);
+        delete[] codes;
+        delete[] ids;
+        return part;
+#else
+        throw std::runtime_error("Quake was built without S3 support (QUAKE_USE_S3 not set).");
+#endif
     }
 
     void DynamicInvertedLists::remove_entry(size_t list_no, idx_t id) {
@@ -475,7 +550,12 @@ void DynamicInvertedLists::batch_update_entries(
         ofs.close();
     }
 
-    void DynamicInvertedLists::load(const string &filename) {
+    void DynamicInvertedLists::load(const string &filename,
+                                    bool metadata_only,
+                                    const string &s3_bucket,
+                                    const string &s3_prefix,
+                                    const string &s3_region,
+                                    const string &s3_endpoint) {
         /**
          * Deserialization Logic:
          *  - Read header (magic, version, nlist, code_size, num_partitions)
@@ -488,8 +568,23 @@ void DynamicInvertedLists::batch_update_entries(
          *      Read codes (num_vectors*code_size)
          *      Read ids   (num_vectors*sizeof(idx_t))
          *      Construct IndexPartition and store in partitions_[pid].
+         *
+         *  When metadata_only=true (S3 mode):
+         *      s3_bucket must be non-empty.
+         *      Only the header and manifests are read; partition data is downloaded from S3
+         *      on demand during search via get_codes()/get_ids().
          */
+        if (metadata_only) {
+            if (s3_bucket.empty()) {
+                throw std::runtime_error(
+                    "DynamicInvertedLists::load: metadata_only requires a non-empty s3_bucket.");
+            }
+        }
+
         reset();
+        s3_mode_ = false;
+        s3_num_vectors_.clear();
+
         std::ifstream ifs(filename, std::ios::binary);
         if (!ifs.is_open()) {
             throw std::runtime_error("Could not open file for reading: " + std::string(filename));
@@ -527,6 +622,45 @@ void DynamicInvertedLists::batch_update_entries(
         ifs.read(reinterpret_cast<char *>(pid_array.data()),
                  pid_array.size() * sizeof(uint64_t));
 
+        ifs.close();
+
+        if (metadata_only) {
+            // S3 mode: build manifest (pid → num_vectors) without loading vector data.
+            uint64_t record_size = static_cast<uint64_t>(code_size) + sizeof(idx_t);
+            size_t max_list_id = 0;
+            for (uint64_t i = 0; i < num_partitions; i++) {
+                size_t pid = static_cast<size_t>(pid_array[i]);
+                uint64_t chunk_size = offsets[i + 1] - offsets[i];
+                uint64_t nv = (record_size > 0) ? chunk_size / record_size : 0;
+                s3_num_vectors_[pid] = static_cast<size_t>(nv);
+                max_list_id = std::max(max_list_id, pid);
+            }
+            curr_list_id_ = max_list_id + 1;
+
+#ifdef QUAKE_USE_S3
+            ensure_aws_initialized();
+            Aws::Client::ClientConfiguration cfg;
+            cfg.region = s3_region;
+            if (!s3_endpoint.empty()) {
+                cfg.endpointOverride = s3_endpoint;
+            }
+            s3_client_ = std::make_shared<Aws::S3::S3Client>(cfg);
+            s3_bucket_ = s3_bucket;
+            s3_prefix_ = s3_prefix;
+            s3_mode_ = true;
+#else
+            throw std::runtime_error(
+                "Quake was built without S3 support (QUAKE_USE_S3 not set).");
+#endif
+            return;
+        }
+
+        // Normal full load: re-open to read partition data.
+        std::ifstream ifs2(filename, std::ios::binary);
+        if (!ifs2.is_open()) {
+            throw std::runtime_error("Could not re-open file for reading: " + std::string(filename));
+        }
+
         // Calculate where chunks begin
         uint64_t offset_table_bytes = (num_partitions + 1) * sizeof(uint64_t);
         uint64_t partition_ids_bytes = num_partitions * sizeof(uint64_t);
@@ -546,7 +680,7 @@ void DynamicInvertedLists::batch_update_entries(
             }
             uint64_t nv64 = chunk_size / record_size; // num_vectors
 
-            ifs.seekg(start_of_chunks + chunk_start, std::ios::beg);
+            ifs2.seekg(start_of_chunks + chunk_start, std::ios::beg);
 
             size_t csize = static_cast<size_t>(nv64) * code_size;
             size_t isize = static_cast<size_t>(nv64) * sizeof(idx_t);
@@ -554,8 +688,8 @@ void DynamicInvertedLists::batch_update_entries(
             idx_t *ids = new idx_t[nv64];
 
             // Read codes and ids from file into allocated buffers
-            ifs.read(reinterpret_cast<char*>(codes), csize);
-            ifs.read(reinterpret_cast<char*>(ids), isize);
+            ifs2.read(reinterpret_cast<char*>(codes), csize);
+            ifs2.read(reinterpret_cast<char*>(ids), isize);
 
             // IndexPartition part = IndexPartition(nv64, codes, ids, code_size);
             shared_ptr<IndexPartition> part = std::make_shared<IndexPartition>(nv64, codes, ids, code_size);
@@ -573,7 +707,7 @@ void DynamicInvertedLists::batch_update_entries(
         }
         curr_list_id_ = max_list_id + 1;
 
-        ifs.close();
+        ifs2.close();
 
         build_map();
     }

@@ -119,10 +119,21 @@ public:
 
     /**
      * @brief Load the index from a file.
-     * @param path Path to load the index.
-     * @param n_workers Number of workers to use for query processing.
+     * @param path            Path to load the index.
+     * @param n_workers       Number of workers to use for query processing.
+     * @param use_numa        Enable NUMA-aware memory allocation.
+     * @param parent_n_workers Number of workers for the parent index.
+     * @param s3_bucket       S3 bucket name. When non-empty, partition data is NOT loaded from
+     *                        disk; instead it is downloaded from S3 on demand during search.
+     * @param s3_prefix       S3 key prefix for partition objects.
+     * @param s3_region       AWS region (default: "us-east-1").
+     * @param s3_endpoint     Optional custom endpoint URL (e.g. for MinIO).
      */
-    void load(const std::string &path, int n_workers = 0, bool use_numa=false, int parent_n_workers=0);
+    void load(const std::string &path, int n_workers = 0, bool use_numa = false,
+              int parent_n_workers = 0,
+              const std::string &s3_bucket = "", const std::string &s3_prefix = "",
+              const std::string &s3_region = "us-east-1",
+              const std::string &s3_endpoint = "");
 
     /**
      * @brief Get the total number of vectors in the index.

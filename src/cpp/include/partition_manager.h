@@ -184,9 +184,17 @@ public:
 
     /**
      * @brief Load the partition manager from a file.
-     * @param path Path to load the partition manager.
+     * @param path           Path to load the partition manager.
+     * @param s3_bucket      S3 bucket (non-empty enables S3/metadata-only mode).
+     * @param s3_prefix      S3 key prefix for partition objects.
+     * @param s3_region      AWS region.
+     * @param s3_endpoint    Optional custom endpoint URL.
      */
-    void load(const string &path);
+    void load(const string &path,
+              const string &s3_bucket = "",
+              const string &s3_prefix = "",
+              const string &s3_region = "us-east-1",
+              const string &s3_endpoint = "");
 };
 
 

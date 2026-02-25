@@ -246,6 +246,10 @@ struct SearchTimingInfo {
     int64_t job_wait_time_ns; ///< Time spent waiting for jobs to complete in nanoseconds.
     int64_t result_aggregate_time_ns; ///< Time spent on aggregating results in nanoseconds.
     int64_t total_time_ns; ///< Total time spent in nanoseconds.
+
+    // S3 stats (populated only when index is in S3 mode)
+    int64_t s3_load_time_ns = 0; ///< Total S3 download time for this query (ns).
+    int64_t n_s3_downloads = 0;  ///< Number of partitions downloaded from S3.
 };
 
 /**

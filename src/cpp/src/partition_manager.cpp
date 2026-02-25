@@ -750,18 +750,23 @@ void PartitionManager::save(const string &path) {
     }
 }
 
-void PartitionManager::load(const string &path) {
+void PartitionManager::load(const string &path,
+                            const string &s3_bucket,
+                            const string &s3_prefix,
+                            const string &s3_region,
+                            const string &s3_endpoint) {
     if (debug_) {
         std::cout << "[PartitionManager] load: Loading partitions from " << path << std::endl;
     }
     if (!partition_store_) {
         partition_store_ = std::make_shared<faiss::DynamicInvertedLists>(0, 0);
     }
-    partition_store_->load(path);
+    bool metadata_only = !s3_bucket.empty();
+    partition_store_->load(path, metadata_only, s3_bucket, s3_prefix, s3_region, s3_endpoint);
     curr_partition_id_ = partition_store_->nlist;
 
-    if (check_uniques_) {
-        // add ids into resident set
+    if (check_uniques_ && !metadata_only) {
+        // add ids into resident set (only when data is actually loaded)
         Tensor ids = get_ids();
         auto ids_a = ids.accessor<int64_t, 1>();
         for (int i = 0; i < ids.size(0); i++) {

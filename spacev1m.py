@@ -48,8 +48,7 @@ scanned_partitions_list = list()
 
 recall_target = 0.9
 
-# for top_K in [10, 30, 50, 100, 200, 500, 1000, 1200]:
-for top_K in [200, 500, 1000, 1200]:
+for top_K in [10, 30, 50, 100]:
     for i in range(q_count):
         query = torch.from_numpy(queries[i].copy()).to(torch.float32).reshape(1, -1)
         search_params = quake.SearchParams()
