@@ -18,6 +18,16 @@ export PATH="${CONDA_DIR_PATH}/bin:${PATH}"
 export DEBIAN_FRONTEND=noninteractive
 
 # -----------------------------
+# MinIO Configuration
+# -----------------------------
+MINIO_DATA_DIR="/opt/minio-data"
+MINIO_USER="minioadmin"
+MINIO_PASSWORD="minioadmin"
+MINIO_PORT="9000"
+MINIO_CONSOLE_PORT="9001"
+MINIO_BUCKET="my-quake-bucket"
+
+# -----------------------------
 # Update System and Install Base APT Packages
 # -----------------------------
 echo ">>> Updating system and installing base APT packages..."
@@ -208,7 +218,7 @@ fi
 # Source oneAPI environment variables for the current session (MKL is needed at quake build time).
 echo ">>> Sourcing Intel oneAPI setvars.sh for current root session..."
 if [ -f "${ONEAPI_INSTALL_PATH}/setvars.sh" ]; then
-    source "${ONEAPI_INSTALL_PATH}/setvars.sh"
+    source "${ONEAPI_INSTALL_PATH}/setvars.sh" || true  # ignore non-zero exit when already sourced
 else
     echo "WARNING: oneAPI setvars.sh not found at ${ONEAPI_INSTALL_PATH}/setvars.sh. Quake build may fail."
 fi
@@ -252,9 +262,87 @@ fi
 
 cd /
 
+# -----------------------------
+# Install and Configure MinIO
+# -----------------------------
+echo ">>> Setting up MinIO S3-compatible object storage..."
+
+# Download MinIO server binary
+if [ -x "/usr/local/bin/minio" ]; then
+    echo "MinIO binary already present. Skipping download."
+else
+    echo "Downloading MinIO server..."
+    wget -qO /usr/local/bin/minio https://dl.min.io/server/minio/release/linux-amd64/minio
+    chmod +x /usr/local/bin/minio
+fi
+
+# Download MinIO client (mc)
+if [ -x "/usr/local/bin/mc" ]; then
+    echo "MinIO client (mc) already present. Skipping download."
+else
+    echo "Downloading MinIO client (mc)..."
+    wget -qO /usr/local/bin/mc https://dl.min.io/client/mc/release/linux-amd64/mc
+    chmod +x /usr/local/bin/mc
+fi
+
+# Create data directory
+mkdir -p "${MINIO_DATA_DIR}"
+
+# Write systemd service file
+cat > /etc/systemd/system/minio.service << EOF
+[Unit]
+Description=MinIO S3-compatible Object Storage
+After=network.target
+
+[Service]
+Type=simple
+User=root
+Environment="MINIO_ROOT_USER=${MINIO_USER}"
+Environment="MINIO_ROOT_PASSWORD=${MINIO_PASSWORD}"
+ExecStart=/usr/local/bin/minio server ${MINIO_DATA_DIR} --address ":${MINIO_PORT}" --console-address ":${MINIO_CONSOLE_PORT}"
+Restart=on-failure
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target
+EOF
+
+systemctl daemon-reload
+systemctl enable minio
+systemctl restart minio
+
+# Wait for MinIO to become ready (up to 30 seconds)
+echo "Waiting for MinIO to be ready..."
+for i in $(seq 1 30); do
+    if curl -sf "http://localhost:${MINIO_PORT}/minio/health/ready" > /dev/null 2>&1; then
+        echo "MinIO is ready."
+        break
+    fi
+    if [ "${i}" -eq 30 ]; then
+        echo "WARNING: MinIO did not become ready within 30 seconds. Check 'systemctl status minio'."
+    fi
+    sleep 1
+done
+
+# Create default bucket using mc
+mc alias set local "http://localhost:${MINIO_PORT}" "${MINIO_USER}" "${MINIO_PASSWORD}" > /dev/null
+mc mb --ignore-existing "local/${MINIO_BUCKET}"
+echo "MinIO bucket '${MINIO_BUCKET}' is ready."
+
 echo "--------------------------------------------------------------------"
 echo "Setup script finished successfully."
 echo "To activate the conda environment (in a new shell, as root or user depending on .bashrc): conda activate ${CONDA_ENV_NAME}"
 echo "QUAKE built from local directory: ${QUAKE_FULL_PATH}"
 echo "Intel oneAPI (if installed) is in ${ONEAPI_INSTALL_PATH}. Source with: source ${ONEAPI_INSTALL_PATH}/setvars.sh"
+echo ""
+echo "MinIO S3-compatible endpoint:  http://localhost:${MINIO_PORT}"
+echo "MinIO console (web UI):        http://localhost:${MINIO_CONSOLE_PORT}"
+echo "MinIO credentials:             ${MINIO_USER} / ${MINIO_PASSWORD}"
+echo "Default bucket:                ${MINIO_BUCKET}"
+echo ""
+echo "To use MinIO with Quake, set these environment variables:"
+echo "  export QUAKE_S3_ENDPOINT=http://localhost:${MINIO_PORT}"
+echo "  export QUAKE_S3_BUCKET=${MINIO_BUCKET}"
+echo "  export AWS_ACCESS_KEY_ID=${MINIO_USER}"
+echo "  export AWS_SECRET_ACCESS_KEY=${MINIO_PASSWORD}"
 echo "--------------------------------------------------------------------"

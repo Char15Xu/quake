@@ -75,6 +75,13 @@ namespace faiss {
     }
 
     size_t DynamicInvertedLists::ntotal() const {
+        if (s3_mode_) {
+            size_t ntotal = 0;
+            for (auto &kv: s3_num_vectors_) {
+                ntotal += kv.second;
+            }
+            return ntotal;
+        }
         size_t ntotal = 0;
         for (auto &kv: partitions_) {
             ntotal += kv.second->num_vectors_;
