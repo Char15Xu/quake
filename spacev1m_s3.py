@@ -24,6 +24,10 @@ import torch
 parser = argparse.ArgumentParser()
 parser.add_argument("--skip-build", action="store_true",
                     help="Skip index building and S3 upload; load the existing index directly.")
+parser.add_argument("--s3-prefetch-initial", type=int, default=4,
+                    help="Number of S3 partitions to prefetch in parallel at query start (default: 4).")
+parser.add_argument("--s3-prefetch-lookahead", type=int, default=4,
+                    help="Number of S3 partitions to prefetch in parallel per subsequent batch (default: 4).")
 args = parser.parse_args()
 
 # ── S3 configuration ────────────────────────────────────────────────────────
@@ -104,6 +108,8 @@ for top_K in [10, 30, 50, 100]:
         search_params = quake.SearchParams()
         search_params.k = top_K
         search_params.recall_target = recall_target
+        search_params.s3_prefetch_initial = args.s3_prefetch_initial
+        search_params.s3_prefetch_lookahead = args.s3_prefetch_lookahead
 
         t0 = time.perf_counter()
         result = s3_index.search(query, search_params)

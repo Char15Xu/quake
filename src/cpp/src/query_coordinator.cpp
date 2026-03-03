@@ -811,7 +811,33 @@ shared_ptr<SearchResult> QueryCoordinator::serial_scan(Tensor x, Tensor partitio
 
         vector<int64_t> scanned_ids;
 
+        // S3 initial-batch prefetch: download the first s3_prefetch_initial partitions
+        // in parallel before the scan loop begins.
+        bool s3_mode = partition_manager_->partition_store_->s3_mode_;
+        if (s3_mode && search_params->s3_prefetch_initial > 1) {
+            std::vector<size_t> init_pids;
+            for (int p = 0; p < std::min(search_params->s3_prefetch_initial, num_parts); p++) {
+                int64_t pi = partition_ids_accessor[q][p];
+                if (pi != -1) init_pids.push_back(static_cast<size_t>(pi));
+            }
+            partition_manager_->partition_store_->prefetch_partitions(init_pids);
+        }
+
         for (int p = 0; p < num_parts; p++) {
+
+            // S3 lookahead prefetch: at each batch boundary beyond the initial batch,
+            // download the next s3_prefetch_lookahead partitions in parallel.
+            if (s3_mode && search_params->s3_prefetch_lookahead > 1
+                    && p >= search_params->s3_prefetch_initial
+                    && (p - search_params->s3_prefetch_initial) % search_params->s3_prefetch_lookahead == 0) {
+                std::vector<size_t> ahead_pids;
+                int end = std::min(p + search_params->s3_prefetch_lookahead, num_parts);
+                for (int lp = p; lp < end; lp++) {
+                    int64_t lpi = partition_ids_accessor[q][lp];
+                    if (lpi != -1) ahead_pids.push_back(static_cast<size_t>(lpi));
+                }
+                partition_manager_->partition_store_->prefetch_partitions(ahead_pids);
+            }
 
             auto curr_time = high_resolution_clock::now();
             int64_t pi = partition_ids_accessor[q][p];

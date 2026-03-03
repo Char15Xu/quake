@@ -327,6 +327,17 @@ namespace faiss {
         void set_thread(size_t list_no, int new_thread_id);
 
         /**
+         * @brief Download a batch of S3 partitions in parallel using GetObjectAsync.
+         *
+         * Fetches all pids not already cached in temp_s3_ concurrently via the AWS SDK's
+         * internal thread pool. S3 load time is recorded as the wall-clock time of the
+         * entire batch. No-op when not in S3 mode.
+         *
+         * @param pids Partition IDs to prefetch.
+         */
+        void prefetch_partitions(const std::vector<size_t>& pids) const;
+
+        /**
          * @brief Save the dynamic inverted lists to a file.
          *
          * The file format includes a header, offsets array, partition ID array,

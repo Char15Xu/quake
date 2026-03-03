@@ -182,6 +182,83 @@ namespace faiss {
 #endif
     }
 
+    void DynamicInvertedLists::prefetch_partitions(const std::vector<size_t>& pids) const {
+        if (!s3_mode_ || pids.empty()) return;
+#ifdef QUAKE_USE_S3
+        // Filter to partitions not yet cached.
+        std::vector<size_t> to_fetch;
+        {
+            std::lock_guard<std::mutex> lk(temp_s3_mutex_);
+            for (size_t pid : pids)
+                if (!temp_s3_.count(pid)) to_fetch.push_back(pid);
+        }
+        if (to_fetch.empty()) return;
+
+        const size_t n = to_fetch.size();
+        std::vector<std::shared_ptr<IndexPartition>> results(n);
+        std::atomic<size_t> n_done{0};
+        std::mutex wait_mutex;
+        std::condition_variable wait_cv;
+
+        auto wall_t0 = high_resolution_clock::now();
+
+        for (size_t i = 0; i < n; i++) {
+            size_t pid = to_fetch[i];
+            size_t nv = s3_num_vectors_.at(pid);
+            size_t csize = nv * static_cast<size_t>(code_size);
+            size_t isize = nv * sizeof(idx_t);
+            int64_t cs = static_cast<int64_t>(code_size);
+
+            Aws::S3::Model::GetObjectRequest req;
+            req.SetBucket(s3_bucket_);
+            req.SetKey(s3_prefix_ + "/partition_" + std::to_string(pid));
+
+            s3_client_->GetObjectAsync(req,
+                [i, nv, csize, isize, cs, n, &results, &n_done, &wait_mutex, &wait_cv]
+                (const Aws::S3::S3Client*,
+                 const Aws::S3::Model::GetObjectRequest&,
+                 Aws::S3::Model::GetObjectOutcome outcome,
+                 const std::shared_ptr<const Aws::Client::AsyncCallerContext>&) {
+                    if (outcome.IsSuccess()) {
+                        auto& body = outcome.GetResult().GetBody();
+                        uint8_t* codes = new uint8_t[csize];
+                        idx_t*   ids   = new idx_t[nv];
+                        body.read(reinterpret_cast<char*>(codes), csize);
+                        body.read(reinterpret_cast<char*>(ids),   isize);
+                        results[i] = std::make_shared<IndexPartition>(
+                            static_cast<int64_t>(nv), codes, ids, cs);
+                        delete[] codes;
+                        delete[] ids;
+                    }
+                    if (n_done.fetch_add(1, std::memory_order_acq_rel) + 1 == n) {
+                        std::lock_guard<std::mutex> lk(wait_mutex);
+                        wait_cv.notify_one();
+                    }
+                }, nullptr);
+        }
+
+        {
+            std::unique_lock<std::mutex> lk(wait_mutex);
+            wait_cv.wait(lk, [&n_done, n] {
+                return n_done.load(std::memory_order_acquire) == n;
+            });
+        }
+
+        int64_t elapsed = duration_cast<nanoseconds>(
+            high_resolution_clock::now() - wall_t0).count();
+
+        {
+            std::lock_guard<std::mutex> lk(temp_s3_mutex_);
+            for (size_t i = 0; i < n; i++) {
+                if (results[i] && !temp_s3_.count(to_fetch[i]))
+                    temp_s3_[to_fetch[i]] = results[i];
+            }
+        }
+        s3_load_time_ns_.fetch_add(elapsed, std::memory_order_relaxed);
+        n_s3_downloads_.fetch_add(static_cast<int64_t>(n), std::memory_order_relaxed);
+#endif
+    }
+
     void DynamicInvertedLists::remove_entry(size_t list_no, idx_t id) {
         auto it = partitions_.find(list_no);
         if (it == partitions_.end()) {

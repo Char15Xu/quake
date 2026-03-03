@@ -217,6 +217,12 @@ PYBIND11_MODULE(_bindings, m) {
                 "Prefix length for APS sampling.")
         .def_readwrite("sample_stride", &SearchParams::sample_stride,
                 "Stride length for APS sampling.")
+        .def_readwrite("s3_prefetch_initial", &SearchParams::s3_prefetch_initial,
+                (std::string("Number of S3 partitions to prefetch in parallel before scanning starts. default = ") +
+                 std::to_string(DEFAULT_S3_PREFETCH_INITIAL)).c_str())
+        .def_readwrite("s3_prefetch_lookahead", &SearchParams::s3_prefetch_lookahead,
+                (std::string("Number of S3 partitions to prefetch in parallel per subsequent batch. default = ") +
+                 std::to_string(DEFAULT_S3_PREFETCH_LOOKAHEAD)).c_str())
 
         .def_readwrite("parent_params", &SearchParams::parent_params,
              "Search parameters for the parent index, if any.")
