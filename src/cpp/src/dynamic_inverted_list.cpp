@@ -728,7 +728,10 @@ void DynamicInvertedLists::batch_update_entries(
             if (!s3_endpoint.empty()) {
                 cfg.endpointOverride = s3_endpoint;
             }
-            s3_client_ = std::make_shared<Aws::S3::S3Client>(cfg);
+            s3_client_ = std::make_shared<Aws::S3::S3Client>(
+                cfg,
+                Aws::Client::AWSAuthV4Signer::PayloadSigningPolicy::Never,
+                /*useVirtualAddressing=*/false);
             s3_bucket_ = s3_bucket;
             s3_prefix_ = s3_prefix;
             s3_mode_ = true;
