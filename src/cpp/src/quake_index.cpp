@@ -236,7 +236,10 @@ void QuakeIndex::save(const std::string& dir_path) {
     std::cout << "[QuakeIndex::save] Index saved to directory: " << dir_path << "\n";
 }
 
-void QuakeIndex::load(const std::string& dir_path, int n_workers, bool use_numa, int parent_n_workers) {
+void QuakeIndex::load(const std::string& dir_path, int n_workers, bool use_numa,
+                      int parent_n_workers,
+                      const std::string& s3_bucket, const std::string& s3_prefix,
+                      const std::string& s3_region, const std::string& s3_endpoint) {
     namespace fs = std::filesystem;
 
     if (!fs::exists(dir_path) || !fs::is_directory(dir_path)) {
@@ -273,7 +276,7 @@ void QuakeIndex::load(const std::string& dir_path, int n_workers, bool use_numa,
     {
         partition_manager_ = std::make_shared<PartitionManager>();
         std::string partitions_path = (fs::path(dir_path) / "partitions").string();
-        partition_manager_->load(partitions_path);
+        partition_manager_->load(partitions_path, s3_bucket, s3_prefix, s3_region, s3_endpoint);
     }
 
     // 3. Check if parent exists and load it

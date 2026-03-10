@@ -75,6 +75,8 @@ constexpr bool DEFAULT_PRECOMPUTED = true;               ///< Default flag to us
 constexpr float DEFAULT_INITIAL_SEARCH_FRACTION = 0.1f; ///< Default initial fraction of partitions to search.
 constexpr float DEFAULT_RECOMPUTE_THRESHOLD = 0.001f;    ///< Default threshold to trigger recomputation of search parameters.
 constexpr int DEFAULT_APS_FLUSH_PERIOD_US = 5;         ///< Default period (in microseconds) for flushing the APS buffer.
+constexpr int DEFAULT_S3_PREFETCH_INITIAL = 1;         ///< Default number of S3 partitions to download in parallel before scanning starts.
+constexpr int DEFAULT_S3_PREFETCH_LOOKAHEAD = 1;       ///< Default number of S3 partitions to download in parallel per subsequent batch.
 
 // Default constants for maintenance policy parameters
 constexpr const char* DEFAULT_MAINTENANCE_POLICY = "query_cost"; ///< Default maintenance policy type.
@@ -196,6 +198,10 @@ struct SearchParams {
     bool use_spann = false;
     float spann_eps = 1.25;
 
+    // S3 prefetch params
+    int s3_prefetch_initial = DEFAULT_S3_PREFETCH_INITIAL;
+    int s3_prefetch_lookahead = DEFAULT_S3_PREFETCH_LOOKAHEAD;
+
     shared_ptr<SearchParams> parent_params = nullptr; ///< Search parameters for the parent index, if any.
 
     SearchParams() = default;
@@ -246,6 +252,10 @@ struct SearchTimingInfo {
     int64_t job_wait_time_ns; ///< Time spent waiting for jobs to complete in nanoseconds.
     int64_t result_aggregate_time_ns; ///< Time spent on aggregating results in nanoseconds.
     int64_t total_time_ns; ///< Total time spent in nanoseconds.
+
+    // S3 stats (populated only when index is in S3 mode)
+    int64_t s3_load_time_ns = 0; ///< Total S3 download time for this query (ns).
+    int64_t n_s3_downloads = 0;  ///< Number of partitions downloaded from S3.
 };
 
 /**

@@ -71,6 +71,13 @@ if(QUAKE_ENABLE_GPU)
 endif()
 
 set(FAISS_ENABLE_GPU OFF)
+
+# AWS SDK for S3 support (optional; enabled when QUAKE_USE_S3 is set)
+if(QUAKE_USE_S3)
+    find_package(AWSSDK REQUIRED COMPONENTS s3)
+    add_compile_definitions(QUAKE_USE_S3)
+    message(STATUS "S3 support enabled via aws-sdk-cpp")
+endif()
 # ---------------------------------------------------------------
 # Print out Compiler and Path Information
 # ---------------------------------------------------------------
@@ -95,7 +102,7 @@ add_compile_options(-march=native)
 
 # Switch ABI mode
 if(QUAKE_SET_ABI_MODE)
-    add_compile_definitions(_GLIBCXX_USE_CXX11_ABI=0)
+    add_compile_definitions(_GLIBCXX_USE_CXX11_ABI=1)
 endif()
 
 
@@ -158,6 +165,10 @@ elseif(UNIX)
 
     if (QUAKE_ENABLE_GPU)
         list(APPEND LINK_LIBS cuvs::cuvs)
+    endif()
+
+    if (QUAKE_USE_S3)
+        list(APPEND LINK_LIBS ${AWSSDK_LINK_LIBRARIES})
     endif()
 else()
     # unsupported platform

@@ -14,6 +14,12 @@
 #include <faiss/invlists/InvertedLists.h>
 #include <index_partition.h>
 
+#ifdef QUAKE_USE_S3
+#include <aws/core/Aws.h>
+#include <aws/s3/S3Client.h>
+#include <aws/s3/model/GetObjectRequest.h>
+#endif
+
 namespace faiss {
     /**
      * @brief A dynamic inverted list implementation using a map of IndexPartition objects.
@@ -33,6 +39,22 @@ namespace faiss {
         unordered_map<size_t, shared_ptr<IndexPartition>> partitions_; ///< Map of partition ID to IndexPartition.
         unordered_map<int64_t, std::pair<IndexPartition*, int64_t>> id_to_location_;
         unordered_map<size_t, bool> tombstones_;
+
+        // S3 mode: partition data is downloaded on demand instead of loaded from disk.
+        bool s3_mode_ = false;
+        std::string s3_bucket_;
+        std::string s3_prefix_;
+#ifdef QUAKE_USE_S3
+        std::shared_ptr<Aws::S3::S3Client> s3_client_;
+#endif
+        /// Manifest: pid → num_vectors (populated when loading in metadata_only mode).
+        unordered_map<size_t, size_t> s3_num_vectors_;
+        /// Temporary per-query downloaded partitions; cleared before/after each search.
+        mutable unordered_map<size_t, shared_ptr<IndexPartition>> temp_s3_;
+        mutable std::mutex temp_s3_mutex_;
+        /// Per-query S3 timing accumulators (reset by QueryCoordinator before each search).
+        mutable std::atomic<int64_t> s3_load_time_ns_{0};
+        mutable std::atomic<int64_t> n_s3_downloads_{0};
 
         /**
          * @brief Constructor for DynamicInvertedLists.
@@ -305,6 +327,17 @@ namespace faiss {
         void set_thread(size_t list_no, int new_thread_id);
 
         /**
+         * @brief Download a batch of S3 partitions in parallel using GetObjectAsync.
+         *
+         * Fetches all pids not already cached in temp_s3_ concurrently via the AWS SDK's
+         * internal thread pool. S3 load time is recorded as the wall-clock time of the
+         * entire batch. No-op when not in S3 mode.
+         *
+         * @param pids Partition IDs to prefetch.
+         */
+        void prefetch_partitions(const std::vector<size_t>& pids) const;
+
+        /**
          * @brief Save the dynamic inverted lists to a file.
          *
          * The file format includes a header, offsets array, partition ID array,
@@ -318,10 +351,23 @@ namespace faiss {
         /**
          * @brief Load the dynamic inverted lists from a file.
          *
-         * @param path The file path.
+         * When metadata_only=true, only the header and partition manifest are read (no vector
+         * data). S3 params enable on-demand downloading of partition data during search.
+         *
+         * @param path         The file path.
+         * @param metadata_only If true, skip loading partition data (for S3 mode).
+         * @param s3_bucket    S3 bucket name (empty = no S3).
+         * @param s3_prefix    S3 key prefix where partitions are stored.
+         * @param s3_region    AWS region.
+         * @param s3_endpoint  Optional custom endpoint URL (e.g. for MinIO).
          * @throws std::runtime_error on file I/O errors or invalid format.
          */
-        void load(const std::string &path);
+        void load(const std::string &path,
+                  bool metadata_only = false,
+                  const std::string &s3_bucket = "",
+                  const std::string &s3_prefix = "",
+                  const std::string &s3_region = "us-east-1",
+                  const std::string &s3_endpoint = "");
 
         /**
          * @brief Retrieve a tensor of partition IDs.
@@ -329,6 +375,10 @@ namespace faiss {
          * @return A 1D tensor containing all partition IDs.
          */
         Tensor get_partition_ids();
+
+    private:
+        /// Download a single partition from S3 and return it as an IndexPartition.
+        shared_ptr<IndexPartition> s3_fetch_partition(size_t pid) const;
 
         template<typename IdT>
         inline void map_add(IndexPartition* p, int64_t off, IdT id) noexcept {

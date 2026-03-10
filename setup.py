@@ -59,6 +59,12 @@ class CMakeBuild(build_ext):
             cmake_args += ["-DQUAKE_ENABLE_GPU=ON"]
         else:
             cmake_args += ["-DQUAKE_ENABLE_GPU=OFF", "-DTorch_NO_CUDA=ON", "-DTorch_USE_CUDA=OFF", "-DUSE_CUDA=OFF"]
+        # S3 support via aws-sdk-cpp (always enabled; SDK expected in CONDA_PREFIX)
+        cmake_args += ["-DQUAKE_USE_S3=ON"]
+        conda_prefix = os.environ.get("CONDA_PREFIX", "")
+        if conda_prefix:
+            cmake_args += ["-DCMAKE_PREFIX_PATH=" + conda_prefix]
+
         # check if numa is available
         try:
             subprocess.check_output(["numactl", "--show"])
