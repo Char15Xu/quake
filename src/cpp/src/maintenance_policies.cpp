@@ -96,9 +96,12 @@ shared_ptr<MaintenanceTimingInfo> MaintenancePolicy::perform_maintenance() {
                     auto search_params = make_shared<SearchParams>();
                     search_params->k = 2; // get the top 2 partitions, ignore the first one as it is the partition itself
                     search_params->batched_scan = true;
+                    partition_manager_->partition_store_->ensure_partition_loaded((size_t)partition_id);
                     float *partition_vectors = (float *) partition_manager_->partition_store_->partitions_[partition_id]->codes_;
+                    // Clone so we can evict the partition from memory immediately.
                     Tensor part_vecs = torch::from_blob(partition_vectors, {(int64_t) partition_manager_->partition_store_->list_size(partition_id),
-                                                                           partition_manager_->d()}, torch::kFloat32);
+                                                                           partition_manager_->d()}, torch::kFloat32).clone();
+                    partition_manager_->partition_store_->evict_partition((size_t)partition_id);
                     auto res = partition_manager_->parent_->search(part_vecs, search_params);
 
                     Tensor reassign_ids = res->ids.flatten();
@@ -189,6 +192,15 @@ shared_ptr<MaintenanceTimingInfo> MaintenancePolicy::perform_maintenance() {
     for (auto pair : partition_manager_->partition_store_->partitions_) {
         if (pair.second->num_vectors_ <= 0) {
             empty_ids.emplace_back(pair.first);
+        }
+    }
+    // In S3 mode, also sweep the manifest for any S3-side empty partitions
+    // that were never materialized into partitions_.
+    if (partition_manager_->partition_store_->s3_mode_) {
+        for (auto& kv : partition_manager_->partition_store_->s3_num_vectors_) {
+            if (kv.second == 0 &&
+                !partition_manager_->partition_store_->partitions_.count(kv.first))
+                empty_ids.emplace_back(static_cast<int64_t>(kv.first));
         }
     }
     if (empty_ids.size() > 0) {

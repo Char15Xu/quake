@@ -18,6 +18,8 @@
 #include <aws/core/Aws.h>
 #include <aws/s3/S3Client.h>
 #include <aws/s3/model/GetObjectRequest.h>
+#include <aws/s3/model/PutObjectRequest.h>
+#include <aws/s3/model/DeleteObjectRequest.h>
 #endif
 
 namespace faiss {
@@ -337,6 +339,11 @@ namespace faiss {
          */
         void prefetch_partitions(const std::vector<size_t>& pids) const;
 
+        // S3 mutation helpers (no-ops when s3_mode_ is false).
+        void ensure_partition_loaded(size_t pid);
+        void flush_partition(size_t pid);
+        void evict_partition(size_t pid);
+
         /**
          * @brief Save the dynamic inverted lists to a file.
          *
@@ -379,18 +386,26 @@ namespace faiss {
     private:
         /// Download a single partition from S3 and return it as an IndexPartition.
         shared_ptr<IndexPartition> s3_fetch_partition(size_t pid) const;
+        void s3_ensure_partition_loaded(size_t pid);
+        void s3_upload_partition(size_t pid);
+        void s3_delete_partition(size_t pid);
+        void s3_evict_partition(size_t pid);
+        /// Build the S3 object key for a partition.
+        std::string s3_partition_key(size_t pid) const {
+            return s3_prefix_ + "/partition_" + std::to_string(pid);
+        }
 
         template<typename IdT>
         inline void map_add(IndexPartition* p, int64_t off, IdT id) noexcept {
-             id_to_location_[id] = {p, off};
+            if (!s3_mode_) id_to_location_[id] = {p, off};
         }
         template<typename IdT>
         inline void map_erase(IdT id) noexcept {
-             id_to_location_.erase(id);
+            if (!s3_mode_) id_to_location_.erase(id);
         }
         template<typename IdT>
         inline void map_swap(IndexPartition* p, int64_t off, IdT id) noexcept {
-             id_to_location_[id] = {p, off};
+            if (!s3_mode_) id_to_location_[id] = {p, off};
         }
     };
 

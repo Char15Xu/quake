@@ -45,7 +45,7 @@ q_dimension = struct.unpack('i', fq.read(4))[0]
 queries = np.frombuffer(fq.read(q_count * q_dimension), dtype=np.int8).reshape((q_count, q_dimension))
 
 print("Loading truth...")
-ftruth = open('/users/yuhong/nvme1n1/SPTAG/datasets/SPACEV1B/gt_10m.bin', 'rb')
+ftruth = open('/users/yuhong/nvme1n1/quake/spacev10m_gt.bin', 'rb')
 t_count = struct.unpack('i', ftruth.read(4))[0]
 topk = struct.unpack('i', ftruth.read(4))[0]
 truth_vids = np.frombuffer(ftruth.read(t_count * topk * 4), dtype=np.int32).reshape((t_count, topk))
