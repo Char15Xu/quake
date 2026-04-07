@@ -477,6 +477,16 @@ void PartitionManager::refine_partitions(Tensor partition_ids, int iterations) {
 
     auto pids = partition_ids.accessor<int64_t, 1>();
 
+    // Prefetch all partitions in parallel (S3 mode), then ensure each is in partitions_.
+    if (partition_store_->s3_mode_) {
+        std::vector<size_t> pids_vec;
+        for (int i = 0; i < partition_ids.size(0); i++)
+            pids_vec.push_back(static_cast<size_t>(pids[i]));
+        partition_store_->prefetch_partitions(pids_vec);
+    }
+    for (int i = 0; i < partition_ids.size(0); i++)
+        partition_store_->ensure_partition_loaded(static_cast<size_t>(pids[i]));
+
     Tensor current_centroids = parent_->get(partition_ids);
     vector<shared_ptr<IndexPartition>> index_partitions(partition_ids.size(0));
     for (int i = 0; i < partition_ids.size(0); i++) {
@@ -491,12 +501,14 @@ void PartitionManager::refine_partitions(Tensor partition_ids, int iterations) {
     // modify centroids
     parent_->modify(partition_ids, current_centroids);
 
-    // replace partitions
+    // replace partitions and flush/evict for S3 mode
     for (int i = 0; i < partition_ids.size(0); i++) {
         partition_store_->partitions_[pids[i]] = index_partitions[i];
+        partition_store_->flush_partition(static_cast<size_t>(pids[i]));
+        partition_store_->evict_partition(static_cast<size_t>(pids[i]));
     }
 
-    partition_store_->build_map();
+    partition_store_->build_map();  // no-op in S3 mode
 
     if (debug_) {
         std::cout << "[PartitionManager] refine_partitions: Completed refinement." << std::endl;
@@ -626,6 +638,7 @@ void PartitionManager::distribute_partitions(int num_workers, bool use_numa) {
 }
 
 void PartitionManager::set_partition_core_id(int64_t partition_id, int core_id, bool use_numa) {
+    if (partition_store_->s3_mode_) return;  // NUMA/core routing not used in S3 mode
     partition_store_->partitions_[partition_id]->set_core_id(core_id);
     int node = cpu_numa_node(core_id);
 
@@ -637,6 +650,7 @@ void PartitionManager::set_partition_core_id(int64_t partition_id, int core_id, 
 }
 
 int PartitionManager::get_partition_core_id(int64_t partition_id) {
+    if (partition_store_->s3_mode_) return -1;
     return partition_store_->partitions_[partition_id]->core_id_;
 }
 
