@@ -287,7 +287,7 @@ def run_one_insert(dataset, d: int, insert_size: int, min_part_vecs: int, max_pa
     insert_parts = parse_partitions_with_hash(TEMP_DIR / "partitions", d)
     insert_diff = diff_snapshots(build_parts, insert_parts)
 
-    return {
+    return index, {
         "build_stats": stage_stats(op_build_ms, maint_build_ms, build_parts, build_diff),
         "insert_stats": stage_stats(op_add_ms, maint_add_ms, insert_parts, insert_diff),
         "build_maintenance_rounds": int(maint_build_rounds),
@@ -348,7 +348,7 @@ def main():
     for insert_size in INSERT_SIZES:
         insert_key = f"{insert_size // 1000}K_insert" if insert_size < 1_000_000 else "1M_insert"
         print(f"\n=== Run: build 10M + insert {insert_size:,} ===")
-        run = run_one_insert(dataset, d, insert_size, min_part_vecs, max_part_vecs)
+        index, run = run_one_insert(dataset, d, insert_size, min_part_vecs, max_part_vecs)
 
         # build stats/partitions should be same shape each run; keep first run's build snapshot.
         if "10M_build" not in payload["stats"]:
