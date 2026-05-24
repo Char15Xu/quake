@@ -184,8 +184,8 @@ def run_queries(cache_capacity, queries, gt_ids):
         sp = quake.SearchParams()
         sp.k = TOP_K
         sp.recall_target = RECALL_TARGET
-        sp.s3_prefetch_initial = 40
-        sp.s3_prefetch_lookahead = 10
+        sp.s3_prefetch_initial = 0
+        sp.s3_prefetch_lookahead = 0
 
         t0 = time.perf_counter()
         result = index.search(q, sp)

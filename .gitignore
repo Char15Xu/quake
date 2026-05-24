@@ -1,1 +1,13 @@
 __pycache__
+
+# Logs
+*.log
+gdb_out.txt
+
+# Python packaging and compiled files
+*.egg-info/
+*.so
+
+# Experiment data and large indexes
+*.index/
+cache_experiment_results/

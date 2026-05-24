@@ -89,6 +89,10 @@ struct CacheEntry {
     LoadState load_state = LoadState::EMPTY;
     std::condition_variable load_cv;
     std::mutex mutex;
+    
+    std::chrono::high_resolution_clock::time_point t_enqueued;
+    std::chrono::high_resolution_clock::time_point t_popped;
+    std::chrono::high_resolution_clock::time_point t_finished;
 
     CacheEntry() = default;
     ~CacheEntry();
@@ -102,7 +106,6 @@ struct CacheEntry {
 // ───────────────────────────────────────────────── Request types
 enum class RequestType {
     LOAD,           // Cache miss — fire async S3 fetch.
-    LOAD_COMPLETE,  // S3 callback — data has arrived.
     ACCESS,         // Cache hit  — update LRU ordering.
     PREFETCH,       // Batch prefetch — fire async S3 fetches.
     STOP            // Shutdown sentinel.
@@ -112,7 +115,7 @@ struct CacheRequest {
     RequestType type;
     size_t partition_id = 0;
     std::vector<size_t> partition_ids;             // Used only for PREFETCH.
-    std::shared_ptr<IndexPartition> loaded_data;   // Used only for LOAD_COMPLETE.
+    std::chrono::high_resolution_clock::time_point enqueue_time;
 };
 
 // ───────────────────────────────────────────────── Cache stats
@@ -124,6 +127,16 @@ struct CacheStats {
     std::atomic<int64_t> s3_load_time_ns{0};   // Total S3 download time (ns).
     std::atomic<int64_t> n_s3_downloads{0};     // Total number of S3 fetches.
 
+    // ── Worker Thread Times (Non-Overlapping, Async-Aware) ────────────────────────
+    std::atomic<int64_t> worker_lookup_time_ns{0}; ///< Hash table locking
+    std::atomic<int64_t> enqueue_time_ns{0};       ///< Queue locking
+    std::atomic<int64_t> manager_queue_wait_ns{0}; ///< Async-aware time blocked waiting on the background queue
+    std::atomic<int64_t> manager_s3_wait_ns{0};    ///< Async-aware time blocked waiting on S3 network downloads
+    
+    // ── Background / Async Times ──────────────────────────────────────
+    std::atomic<int64_t> bg_process_update_time_ns{0}; ///< Background LRU updates
+    std::atomic<int64_t> bg_evict_time_ns{0};      ///< Background evictions
+
     void reset() {
         hits.store(0, std::memory_order_relaxed);
         misses.store(0, std::memory_order_relaxed);
@@ -131,6 +144,13 @@ struct CacheStats {
         total_lookups.store(0, std::memory_order_relaxed);
         s3_load_time_ns.store(0, std::memory_order_relaxed);
         n_s3_downloads.store(0, std::memory_order_relaxed);
+        
+        worker_lookup_time_ns.store(0, std::memory_order_relaxed);
+        enqueue_time_ns.store(0, std::memory_order_relaxed);
+        manager_queue_wait_ns.store(0, std::memory_order_relaxed);
+        manager_s3_wait_ns.store(0, std::memory_order_relaxed);
+        bg_process_update_time_ns.store(0, std::memory_order_relaxed);
+        bg_evict_time_ns.store(0, std::memory_order_relaxed);
     }
 };
 
@@ -221,7 +241,7 @@ public:
     /// Look up a partition.  On hit, pins and returns the entry immediately.
     /// On miss, blocks until the partition is loaded (or an error occurs).
     /// The caller MUST call release() when done reading the partition data.
-    std::shared_ptr<CacheEntry> get(size_t partition_id);
+    std::shared_ptr<CacheEntry> get(size_t partition_id, bool record_stats = true);
 
     /// Release (unpin) a previously get()-ed partition.
     void release(size_t partition_id);
@@ -241,16 +261,14 @@ private:
     // ── Background thread ──────────────────────────────────────────────
     void cache_management_loop();
     void process_load(size_t partition_id);
-    void process_load_complete(size_t partition_id,
-                               std::shared_ptr<IndexPartition> data);
     void process_access(size_t partition_id);
     void process_prefetch(const std::vector<size_t>& partition_ids);
     void evict();
 
     // ── Helpers ────────────────────────────────────────────────────────
     void enqueue(CacheRequest req);
-    /// Fire an async S3 request.  The callback enqueues a LOAD_COMPLETE
-    /// back into this CacheManager's queue.
+    /// Fire an async S3 request.  The callback directly updates the entry
+    /// and enqueues an ACCESS request.
     void fire_async_load(size_t partition_id);
 
     // ── State ──────────────────────────────────────────────────────────

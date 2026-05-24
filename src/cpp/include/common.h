@@ -264,6 +264,14 @@ struct SearchTimingInfo {
     // LRU cache stats (populated only when cache is enabled)
     int64_t cache_hits = 0;      ///< Number of cache hits for this query.
     int64_t cache_misses = 0;    ///< Number of cache misses for this query.
+    
+    // New overhead decomposition timers
+    int64_t cache_worker_lookup_ns = 0;
+    int64_t cache_enqueue_ns = 0;
+    int64_t cache_manager_queue_wait_ns = 0;
+    int64_t cache_manager_s3_wait_ns = 0;
+    int64_t cache_bg_process_update_ns = 0;
+    int64_t cache_bg_evict_ns = 0;
 };
 
 /**

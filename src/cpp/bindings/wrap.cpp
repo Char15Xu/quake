@@ -370,6 +370,18 @@ PYBIND11_MODULE(_bindings, m) {
             "Total S3 download time for this query in nanoseconds (S3 mode only).")
         .def_readwrite("n_s3_downloads", &SearchTimingInfo::n_s3_downloads,
             "Number of partitions downloaded from S3 for this query.")
+        .def_readwrite("cache_worker_lookup_ns", &SearchTimingInfo::cache_worker_lookup_ns,
+            "Hash table locking overhead.")
+        .def_readwrite("cache_enqueue_ns", &SearchTimingInfo::cache_enqueue_ns,
+            "Queue locking overhead.")
+        .def_readwrite("cache_manager_queue_wait_ns", &SearchTimingInfo::cache_manager_queue_wait_ns,
+            "Async-aware queue wait.")
+        .def_readwrite("cache_manager_s3_wait_ns", &SearchTimingInfo::cache_manager_s3_wait_ns,
+            "Async-aware S3 wait.")
+        .def_readwrite("cache_bg_process_update_ns", &SearchTimingInfo::cache_bg_process_update_ns,
+            "LRU update overhead.")
+        .def_readwrite("cache_bg_evict_ns", &SearchTimingInfo::cache_bg_evict_ns,
+            "Eviction overhead.")
         .def_readwrite("cache_hits", &SearchTimingInfo::cache_hits,
             "Number of cache hits for this query (cache mode only).")
         .def_readwrite("cache_misses", &SearchTimingInfo::cache_misses,

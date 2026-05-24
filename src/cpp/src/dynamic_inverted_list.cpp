@@ -116,7 +116,7 @@ namespace faiss {
 
             // If LRU cache is enabled, use it instead of temp_s3_.
             if (cache_manager_) {
-                auto entry = cache_manager_->get(list_no);
+                auto entry = cache_manager_->get(list_no, true);
                 if (entry && entry->partition_data) {
                     return entry->partition_data->codes_;
                 }
@@ -151,7 +151,7 @@ namespace faiss {
 
             // If LRU cache is enabled, use it (partition was already pinned by get_codes).
             if (cache_manager_) {
-                auto entry = cache_manager_->get(list_no);
+                auto entry = cache_manager_->get(list_no, false);
                 if (entry && entry->partition_data) {
                     // This second get() increments pin_count again; the caller
                     // must call release_partition() once for the codes+ids pair.

@@ -195,6 +195,7 @@ shared_ptr<MaintenanceTimingInfo> QuakeIndex::maintenance() {
 
 bool QuakeIndex::validate() {
     partition_manager_->validate();
+    return true;
 }
 
 

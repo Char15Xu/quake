@@ -161,10 +161,9 @@ void S3DataStore::async_load_partition(size_t partition_id, LoadCallback callbac
          Aws::S3::Model::GetObjectOutcome outcome,
          const std::shared_ptr<const Aws::Client::AsyncCallerContext>&) {
 
-            int64_t elapsed = duration_cast<nanoseconds>(
-                high_resolution_clock::now() - t0).count();
-
             if (!outcome.IsSuccess()) {
+                int64_t elapsed = duration_cast<nanoseconds>(
+                    high_resolution_clock::now() - t0).count();
                 std::cerr << "[S3DataStore::async] GetObject failed for partition "
                           << partition_id << ": "
                           << outcome.GetError().GetMessage() << std::endl;
@@ -182,6 +181,9 @@ void S3DataStore::async_load_partition(size_t partition_id, LoadCallback callbac
                 static_cast<int64_t>(nv), codes, ids, cs);
             delete[] codes;
             delete[] ids;
+
+            int64_t elapsed = duration_cast<nanoseconds>(
+                high_resolution_clock::now() - t0).count();
 
             callback(partition_id, std::move(part), elapsed);
         }, nullptr);
@@ -221,17 +223,26 @@ void CacheManager::start() {
 void CacheManager::stop() {
     if (!running_.load(std::memory_order_acquire)) return;
     // Enqueue a STOP sentinel.
-    enqueue(CacheRequest{RequestType::STOP, 0, {}, nullptr});
+    enqueue(CacheRequest{RequestType::STOP, 0, {}});
     if (bg_thread_.joinable()) {
         bg_thread_.join();
     }
     running_.store(false, std::memory_order_release);
+
+    std::cout << "[CacheStats] worker_lookup_time_ns: " << stats_.worker_lookup_time_ns.load() << "\n"
+              << "[CacheStats] manager_queue_wait_ns: " << stats_.manager_queue_wait_ns.load() << "\n"
+              << "[CacheStats] enqueue_time_ns: " << stats_.enqueue_time_ns.load() << "\n"
+              << "[CacheStats] bg_process_update_time_ns: " << stats_.bg_process_update_time_ns.load() << "\n"
+              << "[CacheStats] bg_evict_time_ns: " << stats_.bg_evict_time_ns.load() << std::endl;
 }
 
 // ── Worker-thread API ──────────────────────────────────────────────
 
-std::shared_ptr<CacheEntry> CacheManager::get(size_t partition_id) {
-    stats_.total_lookups.fetch_add(1, std::memory_order_relaxed);
+std::shared_ptr<CacheEntry> CacheManager::get(size_t partition_id, bool record_stats) {
+    auto t_start = high_resolution_clock::now();
+    if (record_stats) {
+        stats_.total_lookups.fetch_add(1, std::memory_order_relaxed);
+    }
 
     std::shared_ptr<CacheEntry> entry;
 
@@ -240,6 +251,7 @@ std::shared_ptr<CacheEntry> CacheManager::get(size_t partition_id) {
         auto it = cache_table_.find(partition_id);
         if (it != cache_table_.end()) {
             entry = it->second;
+            entry->pin(); // Speculative pin
         }
     }
 
@@ -249,42 +261,71 @@ std::shared_ptr<CacheEntry> CacheManager::get(size_t partition_id) {
 
         if (entry->load_state == LoadState::LOADED) {
             // Fast path: cache hit.
-            entry->pin();
-            stats_.hits.fetch_add(1, std::memory_order_relaxed);
+            if (record_stats) {
+                stats_.hits.fetch_add(1, std::memory_order_relaxed);
+            }
             lk.unlock();
 
             // Enqueue ACCESS for LRU update (non-blocking).
-            enqueue(CacheRequest{RequestType::ACCESS, partition_id, {}, nullptr});
+            enqueue(CacheRequest{RequestType::ACCESS, partition_id, {}});
+            
+            auto t_end = high_resolution_clock::now();
+            if (record_stats) {
+                stats_.worker_lookup_time_ns.fetch_add(duration_cast<nanoseconds>(t_end - t_start).count(), std::memory_order_relaxed);
+            }
             return entry;
         }
 
         if (entry->load_state == LoadState::LOADING) {
             // Another thread is already loading this partition.  Wait.
-            stats_.misses.fetch_add(1, std::memory_order_relaxed);
+            if (record_stats) {
+                stats_.misses.fetch_add(1, std::memory_order_relaxed);
+            }
+            
+            auto t_wait_start = high_resolution_clock::now();
+            if (record_stats) {
+                stats_.worker_lookup_time_ns.fetch_add(duration_cast<nanoseconds>(t_wait_start - t_start).count(), std::memory_order_relaxed);
+            }
+
             entry->load_cv.wait(lk, [&entry] {
                 return entry->load_state == LoadState::LOADED ||
                        entry->load_state == LoadState::ERROR;
             });
-            if (entry->load_state == LoadState::LOADED) {
-                entry->pin();
-                return entry;
+            auto t_wait_end = high_resolution_clock::now();
+
+            if (record_stats) {
+                // Intersection with Queue Phase
+                auto q_start = std::max(t_wait_start, entry->t_enqueued);
+                auto q_end   = std::min(t_wait_end, entry->t_popped);
+                if (q_end > q_start) stats_.manager_queue_wait_ns.fetch_add(duration_cast<nanoseconds>(q_end - q_start).count(), std::memory_order_relaxed);
+                
+                // Intersection with S3 Phase
+                auto s3_start = std::max(t_wait_start, entry->t_popped);
+                auto s3_end   = std::min(t_wait_end, entry->t_finished);
+                if (s3_end > s3_start) stats_.manager_s3_wait_ns.fetch_add(duration_cast<nanoseconds>(s3_end - s3_start).count(), std::memory_order_relaxed);
             }
-            // ERROR — fall through and attempt reload below.
+
+            if (entry->load_state == LoadState::LOADED) {
+            }
+            return entry;
         }
     }
 
     // Cache miss: create or re-use an entry and request a LOAD.
-    stats_.misses.fetch_add(entry ? 0 : 1, std::memory_order_relaxed);
+    if (record_stats) {
+        stats_.misses.fetch_add(entry ? 0 : 1, std::memory_order_relaxed);
+    }
 
     if (!entry) {
         entry = std::make_shared<CacheEntry>();
         std::lock_guard<std::mutex> lk(table_mutex_);
-        // Double-check: another thread may have created it.
         auto it = cache_table_.find(partition_id);
         if (it != cache_table_.end()) {
             entry = it->second;
+            entry->pin(); // Speculative pin
         } else {
             cache_table_[partition_id] = entry;
+            entry->pin(); // Speculative pin
         }
     }
 
@@ -293,44 +334,84 @@ std::shared_ptr<CacheEntry> CacheManager::get(size_t partition_id) {
 
         // Re-check after acquiring the entry lock.
         if (entry->load_state == LoadState::LOADED) {
-            entry->pin();
             lk.unlock();
-            enqueue(CacheRequest{RequestType::ACCESS, partition_id, {}, nullptr});
+            enqueue(CacheRequest{RequestType::ACCESS, partition_id, {}});
+            auto t_end = high_resolution_clock::now();
+            if (record_stats) {
+                stats_.worker_lookup_time_ns.fetch_add(duration_cast<nanoseconds>(t_end - t_start).count(), std::memory_order_relaxed);
+            }
             return entry;
         }
+        
         if (entry->load_state == LoadState::LOADING) {
+            auto t_wait_start = high_resolution_clock::now();
+            if (record_stats) {
+                stats_.worker_lookup_time_ns.fetch_add(duration_cast<nanoseconds>(t_wait_start - t_start).count(), std::memory_order_relaxed);
+            }
+
             entry->load_cv.wait(lk, [&entry] {
                 return entry->load_state == LoadState::LOADED ||
                        entry->load_state == LoadState::ERROR;
             });
-            if (entry->load_state == LoadState::LOADED) {
-                entry->pin();
-                return entry;
+            auto t_wait_end = high_resolution_clock::now();
+
+            if (record_stats) {
+                auto q_start = std::max(t_wait_start, entry->t_enqueued);
+                auto q_end   = std::min(t_wait_end, entry->t_popped);
+                if (q_end > q_start) stats_.manager_queue_wait_ns.fetch_add(duration_cast<nanoseconds>(q_end - q_start).count(), std::memory_order_relaxed);
+                
+                auto s3_start = std::max(t_wait_start, entry->t_popped);
+                auto s3_end   = std::min(t_wait_end, entry->t_finished);
+                if (s3_end > s3_start) stats_.manager_s3_wait_ns.fetch_add(duration_cast<nanoseconds>(s3_end - s3_start).count(), std::memory_order_relaxed);
             }
-            // ERROR — the bg thread will retry.
+
+            if (entry->load_state == LoadState::LOADED) {
+            }
+            return entry;
         }
 
         // Mark as LOADING so other threads know to wait.
         entry->load_state = LoadState::LOADING;
     }
 
+    auto t_lookup_end = high_resolution_clock::now();
+    if (record_stats) {
+        stats_.worker_lookup_time_ns.fetch_add(duration_cast<nanoseconds>(t_lookup_end - t_start).count(), std::memory_order_relaxed);
+    }
+    
+    {
+        std::lock_guard<std::mutex> lk(entry->mutex);
+        entry->t_enqueued = high_resolution_clock::now();
+    }
+
     // Enqueue the LOAD request for the background thread.
-    enqueue(CacheRequest{RequestType::LOAD, partition_id, {}, nullptr});
+    enqueue(CacheRequest{RequestType::LOAD, partition_id, {}});
 
     // Wait for the async S3 callback to complete the load.
     {
         std::unique_lock<std::mutex> lk(entry->mutex);
+        
+        auto t_wait_start = high_resolution_clock::now();
         entry->load_cv.wait(lk, [&entry] {
             return entry->load_state == LoadState::LOADED ||
                    entry->load_state == LoadState::ERROR;
         });
+        auto t_wait_end = high_resolution_clock::now();
+
+        if (record_stats) {
+            auto q_start = std::max(t_wait_start, entry->t_enqueued);
+            auto q_end   = std::min(t_wait_end, entry->t_popped);
+            if (q_end > q_start) stats_.manager_queue_wait_ns.fetch_add(duration_cast<nanoseconds>(q_end - q_start).count(), std::memory_order_relaxed);
+            
+            auto s3_start = std::max(t_wait_start, entry->t_popped);
+            auto s3_end   = std::min(t_wait_end, entry->t_finished);
+            if (s3_end > s3_start) stats_.manager_s3_wait_ns.fetch_add(duration_cast<nanoseconds>(s3_end - s3_start).count(), std::memory_order_relaxed);
+        }
+
         if (entry->load_state == LoadState::LOADED) {
-            entry->pin();
-            return entry;
         }
     }
 
-    // Load failed — return the entry anyway (caller must check partition_data).
     return entry;
 }
 
@@ -369,7 +450,7 @@ void CacheManager::prefetch(const std::vector<size_t>& partition_ids) {
     }
 
     if (!to_fetch.empty()) {
-        enqueue(CacheRequest{RequestType::PREFETCH, 0, std::move(to_fetch), nullptr});
+        enqueue(CacheRequest{RequestType::PREFETCH, 0, std::move(to_fetch)});
     }
 }
 
@@ -400,11 +481,14 @@ size_t CacheManager::size() const {
 // ── Background thread ──────────────────────────────────────────────
 
 void CacheManager::enqueue(CacheRequest req) {
+    auto t_start = high_resolution_clock::now();
     {
         std::lock_guard<std::mutex> lk(queue_mutex_);
         request_queue_.push(std::move(req));
     }
     queue_cv_.notify_one();
+    auto t_end = high_resolution_clock::now();
+    stats_.enqueue_time_ns.fetch_add(duration_cast<nanoseconds>(t_end - t_start).count(), std::memory_order_relaxed);
 }
 
 void CacheManager::cache_management_loop() {
@@ -421,12 +505,12 @@ void CacheManager::cache_management_loop() {
             case RequestType::LOAD:
                 process_load(req.partition_id);
                 break;
-            case RequestType::LOAD_COMPLETE:
-                process_load_complete(req.partition_id, std::move(req.loaded_data));
-                break;
-            case RequestType::ACCESS:
+            case RequestType::ACCESS: {
+                auto t_acc_start = high_resolution_clock::now();
                 process_access(req.partition_id);
+                stats_.bg_process_update_time_ns.fetch_add(duration_cast<nanoseconds>(high_resolution_clock::now() - t_acc_start).count(), std::memory_order_relaxed);
                 break;
+            }
             case RequestType::PREFETCH:
                 process_prefetch(req.partition_ids);
                 break;
@@ -436,7 +520,9 @@ void CacheManager::cache_management_loop() {
 
         // After each operation, check if eviction is needed.
         if (capacity_ > 0) {
+            auto t_evict_start = high_resolution_clock::now();
             evict();
+            stats_.bg_evict_time_ns.fetch_add(duration_cast<nanoseconds>(high_resolution_clock::now() - t_evict_start).count(), std::memory_order_relaxed);
         }
     }
 }
@@ -450,12 +536,32 @@ void CacheManager::fire_async_load(size_t partition_id) {
             stats_.s3_load_time_ns.fetch_add(elapsed_ns, std::memory_order_relaxed);
             stats_.n_s3_downloads.fetch_add(1, std::memory_order_relaxed);
 
-            // Enqueue a LOAD_COMPLETE event back into our queue.
-            CacheRequest completion;
-            completion.type = RequestType::LOAD_COMPLETE;
-            completion.partition_id = pid;
-            completion.loaded_data = std::move(data);
-            enqueue(std::move(completion));
+            std::shared_ptr<CacheEntry> entry;
+            {
+                std::lock_guard<std::mutex> lk(table_mutex_);
+                auto it = cache_table_.find(pid);
+                if (it != cache_table_.end()) {
+                    entry = it->second;
+                }
+            }
+
+            if (entry) {
+                std::lock_guard<std::mutex> lk(entry->mutex);
+                if (entry->load_state == LoadState::LOADING) {
+                    entry->t_finished = high_resolution_clock::now();
+                    entry->partition_data = data;
+                    if (data) {
+                        entry->load_state = LoadState::LOADED;
+                        entry->load_cv.notify_all();
+
+                        // Enqueue an ACCESS request so the background thread adds it to the LRU list.
+                        enqueue(CacheRequest{RequestType::ACCESS, pid, {}});
+                    } else {
+                        entry->load_state = LoadState::ERROR;
+                        entry->load_cv.notify_all();
+                    }
+                }
+            }
         });
 }
 
@@ -476,42 +582,12 @@ void CacheManager::process_load(size_t partition_id) {
             entry->load_cv.notify_all();
             return;
         }
+        entry->t_popped = high_resolution_clock::now();
     }
 
     // Fire async S3 request — returns immediately!
     // The callback will enqueue a LOAD_COMPLETE event.
     fire_async_load(partition_id);
-}
-
-void CacheManager::process_load_complete(size_t partition_id,
-                                          std::shared_ptr<IndexPartition> data) {
-    std::shared_ptr<CacheEntry> entry;
-    {
-        std::lock_guard<std::mutex> lk(table_mutex_);
-        auto it = cache_table_.find(partition_id);
-        if (it == cache_table_.end()) return;
-        entry = it->second;
-    }
-    if (!entry) return;
-
-    {
-        std::lock_guard<std::mutex> lk(entry->mutex);
-        if (data) {
-            entry->partition_data = std::move(data);
-
-            // Create and insert LRU node.
-            if (!entry->lru_node) {
-                entry->lru_node = new LRUNode();
-                entry->lru_node->partition_id = partition_id;
-            }
-            lru_list_.insert_at_head(entry->lru_node);
-
-            entry->load_state = LoadState::LOADED;
-        } else {
-            entry->load_state = LoadState::ERROR;
-        }
-        entry->load_cv.notify_all();
-    }
 }
 
 void CacheManager::process_access(size_t partition_id) {
@@ -522,8 +598,14 @@ void CacheManager::process_access(size_t partition_id) {
         if (it == cache_table_.end()) return;
         entry = it->second;
     }
-    if (entry && entry->lru_node) {
-        lru_list_.move_to_head(entry->lru_node);
+    if (entry) {
+        if (!entry->lru_node) {
+            entry->lru_node = new LRUNode();
+            entry->lru_node->partition_id = partition_id;
+            lru_list_.insert_at_head(entry->lru_node);
+        } else {
+            lru_list_.move_to_head(entry->lru_node);
+        }
     }
 }
 
@@ -554,6 +636,8 @@ void CacheManager::process_prefetch(const std::vector<size_t>& partition_ids) {
                 continue;
             }
             entry->load_state = LoadState::LOADING;
+            entry->t_enqueued = high_resolution_clock::now();
+            entry->t_popped = entry->t_enqueued;
         }
 
         // Fire async S3 request — returns immediately!
@@ -562,7 +646,7 @@ void CacheManager::process_prefetch(const std::vector<size_t>& partition_ids) {
 }
 
 void CacheManager::evict() {
-    // Only evict when we exceed threshold.
+    // evict when exceed threshold
     size_t current_size;
     {
         std::lock_guard<std::mutex> lk(table_mutex_);
@@ -572,7 +656,7 @@ void CacheManager::evict() {
     size_t target = static_cast<size_t>(capacity_ * eviction_threshold_);
     if (current_size <= target) return;
 
-    // Walk from tail (least recently used) and evict unpinned entries.
+    // Evict from tail (least recently used) and unpinned entries
     while (current_size > target) {
         LRUNode* victim_node = lru_list_.get_tail();
         if (!victim_node) break;
@@ -590,6 +674,7 @@ void CacheManager::evict() {
             victim = it->second;
         }
 
+        bool should_evict = false;
         {
             std::lock_guard<std::mutex> lk(victim->mutex);
             if (victim->pin_count.load(std::memory_order_relaxed) != 0 ||
@@ -600,19 +685,22 @@ void CacheManager::evict() {
                 break;  // Stop eviction for this round.
             }
 
-            // Evict: clear data, remove from LRU.
-            lru_list_.remove(victim_node);
+            // Mark as empty and clear data to prevent new access from using it
             victim->partition_data.reset();
             victim->load_state = LoadState::EMPTY;
+            should_evict = true;
         }
 
-        {
-            std::lock_guard<std::mutex> lk(table_mutex_);
-            cache_table_.erase(victim_pid);
-            current_size = cache_table_.size();
+        if (should_evict) {
+            // Unlocked victim->mutex to prevent lock inversion!
+            lru_list_.remove(victim_node);
+            {
+                std::lock_guard<std::mutex> lk(table_mutex_);
+                cache_table_.erase(victim_pid);
+                current_size = cache_table_.size();
+            }
+            stats_.evictions.fetch_add(1, std::memory_order_relaxed);
         }
-
-        stats_.evictions.fetch_add(1, std::memory_order_relaxed);
     }
 }
 

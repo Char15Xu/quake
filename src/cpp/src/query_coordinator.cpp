@@ -1041,6 +1041,13 @@ shared_ptr<SearchResult> QueryCoordinator::search(Tensor x, shared_ptr<SearchPar
         // Also report S3 timing from the cache manager (async downloads).
         search_result->timing_info->s3_load_time_ns += cs.s3_load_time_ns.load(std::memory_order_relaxed);
         search_result->timing_info->n_s3_downloads  += cs.n_s3_downloads.load(std::memory_order_relaxed);
+        
+        search_result->timing_info->cache_worker_lookup_ns = cs.worker_lookup_time_ns.load(std::memory_order_relaxed);
+        search_result->timing_info->cache_enqueue_ns = cs.enqueue_time_ns.load(std::memory_order_relaxed);
+        search_result->timing_info->cache_manager_queue_wait_ns = cs.manager_queue_wait_ns.load(std::memory_order_relaxed);
+        search_result->timing_info->cache_manager_s3_wait_ns = cs.manager_s3_wait_ns.load(std::memory_order_relaxed);
+        search_result->timing_info->cache_bg_process_update_ns = cs.bg_process_update_time_ns.load(std::memory_order_relaxed);
+        search_result->timing_info->cache_bg_evict_ns = cs.bg_evict_time_ns.load(std::memory_order_relaxed);
     }
 
     auto end = high_resolution_clock::now();
